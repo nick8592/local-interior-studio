@@ -16,6 +16,11 @@ env/
 models/*.bin
 models/*.safetensors
 models/*.ckpt
+models/*.pth
+
+# Generated output
+output/*.png
+output/*.jpg
 
 # IDE
 .vscode/

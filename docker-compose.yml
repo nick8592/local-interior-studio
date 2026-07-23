@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  studio:
+    build: .
+    container_name: local-interior-studio
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./models:/app/models    # cached model weights (~4 GB)
+      - ./output:/app/output    # generated images
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - DEVICE=auto
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    restart: unless-stopped
