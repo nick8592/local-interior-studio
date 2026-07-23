@@ -184,7 +184,6 @@ Upload a room photo → pick a style preset or write a custom prompt → adjust 
 ### docker-compose.yml
 
 ```yaml
-version: "3.8"
 services:
   studio:
     build: .
