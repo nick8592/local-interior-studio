@@ -174,16 +174,29 @@ def on_auto_segment(editor_value: dict | tuple | None) -> Optional[dict]:
         source = source.convert("RGB")
 
     predictor = _ensure_segment_model()
-    original_size = source.size
+    original_size = source.size  # (w, h)
     source, _ = resize_for_model(source, max_size=768)
 
     mask_arr = generate_mask(source, predictor, max_masks=5)
     mask_img = dilate_mask(Image.fromarray((mask_arr.astype(np.uint8) * 255)), kernel_size=10)
 
-    w, h = source.size
+    # Resize mask back to original image dimensions
+    if mask_img.size != original_size:
+        mask_img = mask_img.resize(original_size, Image.Resampling.LANCZOS)
+
+    # Restore source to original dimensions so the editor keeps full resolution
+    if source.size != original_size:
+        source = source.resize(original_size, Image.Resampling.LANCZOS)
+
+    w, h = original_size
     bg_arr = np.array(source)
+    mask_np = np.array(mask_img)
+
+    # Build RGBA mask layer: white pixels where mask is active, transparent elsewhere.
+    # This makes the mask visible as a white overlay in the ImageEditor.
     mask_layer = np.zeros((h, w, 4), dtype=np.uint8)
-    mask_layer[..., 3] = np.array(mask_img)
+    mask_layer[..., :3] = 255           # white RGB everywhere in mask region
+    mask_layer[..., 3] = mask_np        # alpha = mask intensity (0 or 255)
 
     return {"background": bg_arr, "layers": [mask_layer], "composite": bg_arr}
 
