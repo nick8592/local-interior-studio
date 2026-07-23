@@ -185,7 +185,7 @@ Upload a room photo → pick a style preset or write a custom prompt → adjust 
 
 ```yaml
 services:
-  studio:
+  app:
     build: .
     ports:
       - "7860:7860"
