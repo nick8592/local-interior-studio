@@ -23,3 +23,8 @@ fastapi>=0.100.0,<0.112
 # Utilities
 python-dotenv>=1.0.0
 tqdm>=4.66.0
+
+# Testing
+pytest>=8.0.0
+pytest-anyio>=0.0.0
+hypothesis>=6.100.0
