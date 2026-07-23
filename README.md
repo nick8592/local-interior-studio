@@ -35,6 +35,7 @@ Fully offline interior design tool that restyles room photos using a locally-run
 | Component | Purpose | Implementation |
 |---|---|---|
 | **Image editing model** | Restyle room given a text prompt | InstructPix2Pix (SD 1.5, ~4 GB VRAM) via `pipeline/edit.py` |
+| **Inpainting model** | Restyle masked region only | Stable Diffusion Inpainting (~4 GB VRAM) via `pipeline/inpaint.py` |
 | **Room segmentation** | Auto-detect walls, floor, furniture | Segment Anything (SAM) via `pipeline/segment.py` |
 | **Style presets** | Curated prompt templates | 10 presets in `pipeline/presets.py` |
 | **Image utilities** | Resize, pad, color-space, mask overlay | `utils/image.py` |
@@ -75,6 +76,7 @@ local-interior-studio/
 ├── pipeline/
 │   ├── __init__.py
 │   ├── edit.py             # InstructPix2Pix inference wrapper
+│   ├── inpaint.py          # Stable Diffusion Inpainting wrapper
 │   ├── segment.py          # Room segmentation (SAM)
 │   └── presets.py          # Style prompt templates (10 presets)
 ├── models/
@@ -82,10 +84,12 @@ local-interior-studio/
 ├── output/                 # Generated images (mounted volume)
 ├── utils/
 │   ├── __init__.py
-│   └── image.py            # Resize, pad, color-space, mask overlay helpers
+│   └── image.py            # Resize, pad, color-space, mask overlay, mask extraction helpers
 └── tests/
     ├── __init__.py
     ├── test_edit.py         # Unit tests for edit pipeline (mocked)
+    ├── test_inpaint.py      # Unit tests for inpaint pipeline (mocked)
+    ├── test_image.py        # Unit tests for mask utilities (mocked)
     └── test_segment.py      # Unit tests for segmentation (mocked)
 ```
 
@@ -123,6 +127,9 @@ Copy `.env.example` to `.env` and adjust:
 |---|---|---|
 | `EDIT_MODEL_ID` | `timbrooks/instruct-pix2pix` | HuggingFace model ID |
 | `SAM_CHECKPOINT` | `sam_vit_h_4b8939.pth` | SAM checkpoint filename |
+| `INPAINT_MODEL_ID` | `runwayml/stable-diffusion-inpainting` | HuggingFace inpaint model ID |
+| `INPAINT_STEPS` | `25` | Inpaint diffusion steps |
+| `INPAINT_GUIDANCE_SCALE` | `7.5` | Inpaint text prompt adherence |
 | `DEVICE` | `auto` | `cuda`, `mps`, `cpu`, or `auto` |
 | `DEFAULT_STEPS` | `20` | Diffusion inference steps |
 | `DEFAULT_GUIDANCE_SCALE` | `7.5` | Text prompt adherence |
@@ -134,6 +141,24 @@ Copy `.env.example` to `.env` and adjust:
 ## UI — Gradio interface
 
 The entire user interaction flows through a **Gradio** web UI served at `http://localhost:7860`. No separate frontend needed — Gradio handles image upload, style selection, and result display in a single browser tab.
+
+### Image editing tab (v0.2 — implemented)
+
+Upload a room photo → paint a mask on the areas you want to edit (or click **Auto-Segment** to let SAM detect regions) → describe what to fill the masked area with → adjust inpaint settings and click **Generate (Inpaint)** → view and download the result with only the masked region changed.
+
+This tab is for **image editing only** (adding, removing, or replacing objects via inpainting). For **style changes** (restyling the entire room), use the Restyle tab.
+
+| Control | Component | Range |
+|---|---|---|
+| Source photo + mask | `gr.ImageEditor` (RGBA, brush) | — |
+| Auto-Segment | Button (SAM) | — |
+| Inpaint Prompt | `gr.Textbox` | Free text |
+| Negative Prompt | `gr.Textbox` | Free text |
+| Inpaint Strength | `gr.Slider` | 0.1 – 1.0 (default 1.0) |
+| Guidance Scale | `gr.Slider` | 1.0 – 15.0 (default 7.5) |
+| Inference Steps | `gr.Slider` | 10 – 50 (default 25) |
+| Mask Dilation | `gr.Slider` | 0 – 30 px (default 10) |
+| Seed | `gr.Number` | −1 = random |
 
 ### Restyle tab (v0.1 — implemented)
 
@@ -153,8 +178,8 @@ Upload a room photo → pick a style preset or write a custom prompt → adjust 
 
 | Tab | Status | Workflow |
 |---|---|---|
-| **Restyle** | ✅ Implemented | Upload → pick style → generate |
-| **Masked edit** | 🔲 Planned | Auto-segment → draw mask → restyle masked area only |
+| **Restyle** | ✅ Implemented | Upload → pick style → generate (style change only) |
+| **Image editing** | ✅ Implemented | Auto-segment → draw mask → inpaint masked area (editing only, no style change) |
 | **Batch** | 🔲 Planned | Upload folder → pick style → restyle all |
 | **Upscale** | 🔲 Planned | 4× Real-ESRGAN upscaling for print quality |
 
@@ -212,7 +237,7 @@ Tests use mocked ML objects and run without GPU, model downloads, or internet ac
 ## Roadmap
 
 - [x] **v0.1 — Proof of concept** — single-image restyle with InstructPix2Pix + Gradio UI (Restyle tab)
-- [ ] **v0.2 — Masked editing** — SAM segmentation + user-drawn mask + inpainting (Masked edit tab)
+- [x] **v0.2 — Image editing (inpainting)** — SAM segmentation + user-drawn mask + Stable Diffusion Inpainting (Masked edit tab — pure editing, no style change)
 - [ ] **v0.3 — Style presets** — curated prompt library with preview thumbnails
 - [ ] **v0.4 — Multi-room batch** — process a folder of room photos with one style (Batch tab)
 - [ ] **v0.5 — Upscale output** — Real-ESRGAN 4× upscaling for print-quality renders (Upscale tab)
