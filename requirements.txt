@@ -1,21 +1,24 @@
 # Core ML
 torch>=2.1.0
 torchvision>=0.16.0
-diffusers>=0.25.0
-transformers>=4.36.0
+diffusers>=0.25.0,<0.28
+transformers>=4.36.0,<4.45
 accelerate>=0.25.0
 safetensors>=0.4.0
+huggingface-hub>=0.20.2,<0.24
 
 # Image processing
 Pillow>=10.0.0
 opencv-python-headless>=4.9.0
-numpy>=1.24.0
+numpy>=1.24.0,<2
 
 # Segmentation
 segment-anything @ git+https://github.com/facebookresearch/segment-anything.git
 
 # UI
-gradio>=4.14.0
+gradio==4.19.2
+starlette>=0.30.0,<0.37
+fastapi>=0.100.0,<0.112
 
 # Utilities
 python-dotenv>=1.0.0
