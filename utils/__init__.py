@@ -6,4 +6,6 @@ from utils.image import (
     to_rgb,
     overlay_mask,
     unpad_image,
+    extract_mask_from_editor,
+    dilate_mask,
 )

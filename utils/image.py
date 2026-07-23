@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -176,3 +177,109 @@ def save_output(
     image.save(str(dest), format="PNG")
     logger.info("Saved output to %s", dest)
     return dest
+
+
+def extract_mask_from_editor(
+    editor_value: dict | tuple | None,
+) -> Image.Image:
+    """Extract a binary edit mask from a Gradio ``ImageEditor`` output.
+
+    Gradio ``ImageEditor`` returns either a dict ``{"background", "layers",
+    "composite"}`` (current API) or a tuple ``(background, mask)`` (legacy
+    API).  User-drawn strokes appear as RGBA ``layers`` where non-transparent
+    pixels mark the edit region.
+
+    Args:
+        editor_value: Output value from ``gr.ImageEditor`` — dict, tuple, or
+            ``None`` if the user has not interacted with the editor.
+
+    Returns:
+        Grayscale PIL Image in mode ``"L"``.  White (255) marks the edit
+        region, black (0) marks the keep region.  When no strokes are
+        present the returned mask is fully white (entire image is editable).
+    """
+    if editor_value is None:
+        return Image.new("L", (512, 512), 255)
+
+    if isinstance(editor_value, tuple):
+        if len(editor_value) >= 2 and editor_value[1] is not None:
+            mask_arr = np.asarray(editor_value[1])
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr[..., 0]
+            binary = (mask_arr > 0).astype(np.uint8) * 255
+            return Image.fromarray(binary, mode="L")
+        bg = editor_value[0] if len(editor_value) >= 1 else None
+        bg_arr = np.asarray(bg) if bg is not None else None
+        if bg_arr is not None:
+            h, w = bg_arr.shape[:2]
+            return Image.new("L", (w, h), 255)
+        return Image.new("L", (512, 512), 255)
+
+    if isinstance(editor_value, dict):
+        bg = editor_value.get("background")
+        layers = editor_value.get("layers") or []
+
+        bg_arr = np.asarray(bg) if bg is not None else None
+        layer_arrs = [np.asarray(layer) for layer in layers if layer is not None]
+
+        if bg_arr is not None:
+            h, w = bg_arr.shape[:2]
+        elif layer_arrs:
+            h, w = layer_arrs[0].shape[:2]
+        else:
+            return Image.new("L", (512, 512), 255)
+
+        if not layer_arrs:
+            return Image.new("L", (w, h), 255)
+
+        # alpha > 0 → edit region (user stroke).
+        composite = np.zeros((h, w), dtype=np.uint8)
+        for layer_arr in layer_arrs:
+            if layer_arr.ndim == 2:
+                layer_mask = (layer_arr > 0).astype(np.uint8)
+            elif layer_arr.shape[-1] >= 4:
+                alpha = layer_arr[..., 3]
+                layer_mask = (alpha > 0).astype(np.uint8)
+            else:
+                layer_mask = (layer_arr.max(axis=-1) > 0).astype(np.uint8)
+            composite = np.maximum(composite, layer_mask * 255)
+
+        return Image.fromarray(composite, mode="L")
+
+    return Image.new("L", (512, 512), 255)
+
+
+def dilate_mask(
+    mask: Image.Image,
+    kernel_size: int = 10,
+) -> Image.Image:
+    """Expand a binary mask by ``kernel_size`` pixels via morphological dilation.
+
+    An elliptical structuring element is used so the resulting boundary is
+    softer than a square kernel — this gives inpainting models enough
+    surrounding context to avoid hard seams at the mask edge.
+
+    Args:
+        mask: Binary PIL Image.  Non-zero pixels are treated as the active
+            region.
+        kernel_size: Side length of the elliptical kernel in pixels.  The
+            effective expansion is roughly half this value per side.  Values
+            below 1 are clamped to 1.
+
+    Returns:
+        Dilated PIL Image in mode ``"L"`` with values 0 or 255.
+    """
+    safe_kernel = max(1, int(kernel_size))
+    mask_arr = np.asarray(mask.convert("L"))
+    binary = (mask_arr > 0).astype(np.uint8) * 255
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (safe_kernel, safe_kernel))
+    dilated = cv2.dilate(binary, kernel, iterations=1)
+
+    active_before = int((binary > 0).sum())
+    active_after = int((dilated > 0).sum())
+    logger.debug(
+        "Dilated mask by %dpx (active px: %d → %d)",
+        safe_kernel, active_before, active_after,
+    )
+    return Image.fromarray(dilated, mode="L")
