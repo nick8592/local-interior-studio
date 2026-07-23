@@ -105,12 +105,11 @@ def load_segmentation_model(
         checkpoint_path = str(ckpt)
 
     model_type = _infer_model_type(Path(checkpoint_path).name)
-    dtype = torch.float16 if target == "cuda" else torch.float32
 
-    logger.info("Loading SAM '%s' from %s on %s (%s)", model_type, checkpoint_path, target, dtype)
+    logger.info("Loading SAM '%s' from %s on %s", model_type, checkpoint_path, target)
 
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
-    sam.to(device=target, dtype=dtype)
+    sam.to(device=target)
 
     predictor = SamPredictor(sam)
     logger.info("SAM predictor ready")
@@ -161,7 +160,7 @@ def segment_room(
 
         sam_model = predictor.model
         amg = SamAutomaticMaskGenerator(sam_model)
-        amg_results = amg(img_np)
+        amg_results = amg.generate(img_np)
 
         for entry in sorted(amg_results, key=lambda e: e["area"], reverse=True):
             masks.append(entry["segmentation"])
