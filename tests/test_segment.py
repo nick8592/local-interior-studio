@@ -59,7 +59,7 @@ class TestInferModelType:
 # ---------------------------------------------------------------------------
 
 class TestDownloadSAMCheckpoint:
-    @patch("pipeline.segment.urllib.request.urlretrieve")
+    @patch("urllib.request.urlretrieve")
     @patch("pipeline.segment.Path")
     def test_downloads_if_missing(self, mock_path_cls: MagicMock, mock_urlretrieve: MagicMock) -> None:
         mock_dest = MagicMock()
@@ -68,7 +68,6 @@ class TestDownloadSAMCheckpoint:
         mock_dest.__truediv__ = MagicMock(return_value=mock_dest)
         mock_dest.stat.return_value.st_size = int(2.4e9)
 
-        # Patch the import check
         with patch.dict("sys.modules", {"segment_anything": MagicMock()}):
             from pipeline.segment import download_sam_checkpoint
 
@@ -84,7 +83,7 @@ class TestDownloadSAMCheckpoint:
         with patch.dict("sys.modules", {"segment_anything": MagicMock()}):
             from pipeline.segment import download_sam_checkpoint
 
-            with patch("pipeline.segment.urllib.request.urlretrieve") as mock_dl:
+            with patch("urllib.request.urlretrieve") as mock_dl:
                 result = download_sam_checkpoint(output_dir=str(tmp_path))
                 mock_dl.assert_not_called()
 
@@ -127,7 +126,7 @@ class TestSegmentRoom:
             {"segmentation": ~fake_mask, "area": 1024},
         ]
 
-        with patch("pipeline.segment.SamAutomaticMaskGenerator") as mock_amg_cls:
+        with patch("segment_anything.SamAutomaticMaskGenerator") as mock_amg_cls:
             mock_amg = MagicMock()
             mock_amg.return_value = amg_results
             mock_amg_cls.return_value = mock_amg
@@ -143,7 +142,7 @@ class TestSegmentRoom:
         mock_predictor = MagicMock()
         mock_predictor.model = MagicMock()
 
-        with patch("pipeline.segment.SamAutomaticMaskGenerator") as mock_amg_cls:
+        with patch("segment_anything.SamAutomaticMaskGenerator") as mock_amg_cls:
             mock_amg_cls.return_value = MagicMock(return_value=[])
 
             masks = segment_room(image=rgba_image, predictor=mock_predictor)
