@@ -45,17 +45,13 @@ def _ensure_model():
 # Callbacks
 # ---------------------------------------------------------------------------
 
-def on_preset_selected(preset_name: str) -> dict:
-    """Populate prompt fields when a style preset is chosen."""
+def on_preset_selected(preset_name: str):
     try:
         preset = get_preset(preset_name)
     except KeyError:
-        return gr.update(value="", placeholder="Type a custom instruction…")
+        return "", ""
 
-    return {
-        prompt_box: gr.update(value=preset["prompt"]),
-        negative_box: gr.update(value=preset["negative_prompt"]),
-    }
+    return preset["prompt"], preset["negative_prompt"]
 
 
 def generate(
