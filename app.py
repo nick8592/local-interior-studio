@@ -6,6 +6,9 @@ a locally-runnable InstructPix2Pix model.
 
 from __future__ import annotations
 
+import base64
+import io
+import json
 import logging
 import os
 from pathlib import Path
@@ -16,10 +19,11 @@ import numpy as np
 from dotenv import load_dotenv
 from PIL import Image
 
+from components.instance_selector import encode_mask_rle, render_instance_selector_html
 from pipeline.edit import edit_image, get_device, load_edit_model
 from pipeline.inpaint import inpaint_image, load_inpaint_model
 from pipeline.presets import get_preset, get_preset_names
-from pipeline.segment import generate_mask, load_segmentation_model
+from pipeline.segment import load_segmentation_model, segment_room_detailed
 from utils.image import (
     dilate_mask,
     extract_mask_from_editor,
@@ -152,12 +156,11 @@ def generate(
     return result, f"Done — saved to `{saved_path}`"
 
 
-def on_auto_segment(editor_value: dict | tuple | None) -> Optional[dict]:
-    """Run SAM auto-segmentation and return an ImageEditor-compatible dict with the mask."""
+def on_auto_segment_interactive(editor_value: dict | tuple | None) -> tuple[str, list[dict]]:
+    """Run SAM segmentation and return HTML for InstanceSelector + instance state."""
     if editor_value is None:
         raise gr.Error("Please upload a room photo first.")
 
-    # Extract background image from ImageEditor dict/tuple
     bg_arr = None
     if isinstance(editor_value, dict):
         bg = editor_value.get("background")
@@ -175,30 +178,112 @@ def on_auto_segment(editor_value: dict | tuple | None) -> Optional[dict]:
 
     predictor = _ensure_segment_model()
     original_size = source.size  # (w, h)
-    source, _ = resize_for_model(source, max_size=768)
+    source_resized, _ = resize_for_model(source, max_size=768)
 
-    mask_arr = generate_mask(source, predictor, max_masks=5)
-    mask_img = dilate_mask(Image.fromarray((mask_arr.astype(np.uint8) * 255)), kernel_size=10)
+    instances = segment_room_detailed(source_resized, predictor)
 
-    # Resize mask back to original image dimensions
-    if mask_img.size != original_size:
-        mask_img = mask_img.resize(original_size, Image.Resampling.LANCZOS)
+    if not instances:
+        raise gr.Error("No objects detected in this image. Try a different photo.")
 
-    # Restore source to original dimensions so the editor keeps full resolution
-    if source.size != original_size:
-        source = source.resize(original_size, Image.Resampling.LANCZOS)
+    canvas_source = source_resized
+    if canvas_source.mode != "RGB":
+        canvas_source = canvas_source.convert("RGB")
+    buf = io.BytesIO()
+    canvas_source.save(buf, format="JPEG", quality=85)
+    image_data_url = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
-    w, h = original_size
-    bg_arr = np.array(source)
+    canvas_w, canvas_h = canvas_source.size
+    original_w, original_h = original_size
+    scale_to_orig_x = original_w / canvas_w
+    scale_to_orig_y = original_h / canvas_h
+
+    frontend_instances = []
+    for inst in instances:
+        frontend_instances.append({
+            "id": inst["id"],
+            "mask_rle": encode_mask_rle(inst["mask"]),
+            "bbox": inst["bbox"],
+            "area": int(inst["area"]),
+            "score": inst["score"],
+            "height": canvas_h,
+            "width": canvas_w,
+        })
+
+    def _to_original_res(mask: np.ndarray) -> np.ndarray:
+        if mask.shape[:2] != (original_h, original_w):
+            mask_img = Image.fromarray((mask.astype(np.uint8) * 255))
+            mask_img = mask_img.resize((original_w, original_h), Image.Resampling.LANCZOS)
+            return np.array(mask_img) > 127
+        return mask
+
+    state_instances = [
+        {"id": inst["id"], "mask": _to_original_res(inst["mask"])}
+        for inst in instances
+    ]
+
+    html_str = render_instance_selector_html(image_data_url, frontend_instances)
+
+    return html_str, state_instances
+
+
+def on_confirm_selection(
+    selection_json: str,
+    instance_state: list[dict] | None,
+    editor_value: dict | tuple | None,
+) -> tuple[dict, str]:
+    """Combine selected instance masks and send to Masked Edit tab."""
+    if instance_state is None or not instance_state:
+        raise gr.Error("Run Auto-Segment first to detect objects.")
+
+    try:
+        selected_ids = json.loads(selection_json)
+    except (json.JSONDecodeError, TypeError):
+        selected_ids = []
+
+    if not selected_ids:
+        raise gr.Error("Select at least one object before confirming.")
+
+    bg_arr = None
+    if isinstance(editor_value, dict):
+        bg = editor_value.get("background")
+        if bg is not None:
+            bg_arr = np.asarray(bg)
+    elif isinstance(editor_value, tuple) and len(editor_value) >= 1:
+        bg_arr = np.asarray(editor_value[0]) if editor_value[0] is not None else None
+
+    if bg_arr is None:
+        raise gr.Error("Could not extract source image.")
+
+    source = Image.fromarray(bg_arr)
+    if source.mode != "RGB":
+        source = source.convert("RGB")
+
+    h, w = source.size[::-1]
+
+    combined = np.zeros((h, w), dtype=bool)
+    for inst in instance_state:
+        if inst["id"] in selected_ids:
+            mask = inst["mask"]
+            if mask.shape[:2] != (h, w):
+                mask_img = Image.fromarray((mask.astype(np.uint8) * 255))
+                mask_img = mask_img.resize((w, h), Image.Resampling.LANCZOS)
+                mask = np.array(mask_img) > 127
+            combined = np.logical_or(combined, mask)
+
+    mask_img = dilate_mask(Image.fromarray((combined.astype(np.uint8) * 255)), kernel_size=10)
     mask_np = np.array(mask_img)
 
-    # Build RGBA mask layer: white pixels where mask is active, transparent elsewhere.
-    # This makes the mask visible as a white overlay in the ImageEditor.
-    mask_layer = np.zeros((h, w, 4), dtype=np.uint8)
-    mask_layer[..., :3] = 255           # white RGB everywhere in mask region
-    mask_layer[..., 3] = mask_np        # alpha = mask intensity (0 or 255)
+    bg_arr = np.array(source)
 
-    return {"background": bg_arr, "layers": [mask_layer], "composite": bg_arr}
+    # RGBA mask layer: white pixels where mask is active, transparent elsewhere.
+    mask_layer = np.zeros((h, w, 4), dtype=np.uint8)
+    mask_layer[..., :3] = 255
+    mask_layer[..., 3] = mask_np
+
+    editor_dict = {"background": bg_arr, "layers": [mask_layer], "composite": bg_arr}
+    summary = f"Sent {len(selected_ids)} object(s) to Masked Edit"
+
+    return editor_dict, summary
 
 
 def generate_masked(
@@ -292,157 +377,186 @@ def build_ui() -> gr.Blocks:
             "No cloud, no data leaving your machine."
         )
 
-        with gr.Tab("Restyle"):
-            with gr.Row():
-                # --- Input column ---
-                with gr.Column(scale=1):
-                    source_img = gr.Image(
-                        type="pil",
-                        label="Room Photo",
-                        sources=["upload", "clipboard"],
-                    )
-
-                    _restyle_examples = _list_example_images()
-                    if _restyle_examples:
-                        gr.Examples(
-                            examples=[[p] for p in _restyle_examples],
-                            inputs=[source_img],
-                            label="Example Room Photos",
+        with gr.Tabs(selected="restyle") as tabs:
+            with gr.Tab("Restyle", id="restyle"):
+                with gr.Row():
+                    # --- Input column ---
+                    with gr.Column(scale=1):
+                        source_img = gr.Image(
+                            type="pil",
+                            label="Room Photo",
+                            sources=["upload", "clipboard"],
                         )
 
-                    preset_dd = gr.Dropdown(
-                        choices=preset_names,
-                        value=preset_names[0],
-                        label="Style Preset",
-                        filterable=True,
-                    )
+                        _restyle_examples = _list_example_images()
+                        if _restyle_examples:
+                            gr.Examples(
+                                examples=[[p] for p in _restyle_examples],
+                                inputs=[source_img],
+                                label="Example Room Photos",
+                            )
 
-                    prompt_box = gr.Textbox(
-                        label="Prompt",
-                        placeholder="Select a preset or type a custom instruction…",
-                        lines=3,
-                    )
-
-                    negative_box = gr.Textbox(
-                        label="Negative Prompt",
-                        placeholder="What to avoid (optional)…",
-                        lines=2,
-                    )
-
-                    img_gs_slider = gr.Slider(
-                        minimum=1.0,
-                        maximum=3.0,
-                        value=1.5,
-                        step=0.1,
-                        label="Edit Strength (image guidance scale)",
-                        info="Lower = more faithful to original. Higher = more creative.",
-                    )
-
-                    steps_slider = gr.Slider(
-                        minimum=10,
-                        maximum=50,
-                        value=20,
-                        step=1,
-                        label="Inference Steps",
-                        info="More steps = higher quality, slower.",
-                    )
-
-                    seed_input = gr.Number(
-                        value=-1,
-                        label="Seed (−1 = random)",
-                        precision=0,
-                    )
-
-                    generate_btn = gr.Button("✨ Generate", variant="primary")
-
-                # --- Output column ---
-                with gr.Column(scale=1):
-                    output_img = gr.Image(type="pil", label="Result")
-                    status_md = gr.Markdown("Ready")
-
-        with gr.Tab("Masked Edit"):
-            with gr.Row():
-                # --- Input column ---
-                with gr.Column(scale=1):
-                    mask_editor = gr.ImageEditor(
-                        type="numpy",
-                        image_mode="RGBA",
-                        brush=gr.Brush(default_size=25, colors=["#ffffff"]),
-                        label="Room Photo + Mask",
-                        sources=["upload", "clipboard"],
-                    )
-
-                    _masked_examples = _list_example_images()
-                    if _masked_examples:
-                        gr.Examples(
-                            examples=[[p] for p in _masked_examples],
-                            inputs=[mask_editor],
-                            label="Example Room Photos",
+                        preset_dd = gr.Dropdown(
+                            choices=preset_names,
+                            value=preset_names[0],
+                            label="Style Preset",
+                            filterable=True,
                         )
 
-                    auto_seg_btn = gr.Button("🔍 Auto-Segment (SAM)", variant="secondary")
+                        prompt_box = gr.Textbox(
+                            label="Prompt",
+                            placeholder="Select a preset or type a custom instruction…",
+                            lines=3,
+                        )
 
-                    gr.Markdown("### Inpaint settings")
-                    inpaint_prompt_box = gr.Textbox(
-                        label="Inpaint Prompt",
-                        placeholder="What to fill the masked area with (e.g. 'clean empty room')…",
-                        lines=2,
-                    )
+                        negative_box = gr.Textbox(
+                            label="Negative Prompt",
+                            placeholder="What to avoid (optional)…",
+                            lines=2,
+                        )
 
-                    inpaint_negative_box = gr.Textbox(
-                        label="Negative Prompt",
-                        placeholder="What to avoid in the inpainted area (optional)…",
-                        lines=2,
-                    )
+                        img_gs_slider = gr.Slider(
+                            minimum=1.0,
+                            maximum=3.0,
+                            value=1.5,
+                            step=0.1,
+                            label="Edit Strength (image guidance scale)",
+                            info="Lower = more faithful to original. Higher = more creative.",
+                        )
 
-                    inpaint_strength_slider = gr.Slider(
-                        minimum=0.1,
-                        maximum=1.0,
-                        value=1.0,
-                        step=0.05,
-                        label="Inpaint Strength",
-                        info="How much to change the masked area. 1.0 = full replacement.",
-                    )
+                        steps_slider = gr.Slider(
+                            minimum=10,
+                            maximum=50,
+                            value=20,
+                            step=1,
+                            label="Inference Steps",
+                            info="More steps = higher quality, slower.",
+                        )
 
-                    inpaint_guidance_slider = gr.Slider(
-                        minimum=1.0,
-                        maximum=15.0,
-                        value=7.5,
-                        step=0.5,
-                        label="Guidance Scale",
-                        info="How closely to follow the prompt. Higher = more faithful.",
-                    )
+                        seed_input = gr.Number(
+                            value=-1,
+                            label="Seed (−1 = random)",
+                            precision=0,
+                        )
 
-                    mask_dilate_slider = gr.Slider(
-                        minimum=0,
-                        maximum=30,
-                        value=10,
-                        step=1,
-                        label="Mask Dilation (px)",
-                        info="Expand mask edges to avoid hard seams. 0 = no dilation.",
-                    )
+                        generate_btn = gr.Button("✨ Generate", variant="primary")
 
-                    mask_steps_slider = gr.Slider(
-                        minimum=10,
-                        maximum=50,
-                        value=25,
-                        step=1,
-                        label="Inference Steps",
-                        info="More steps = higher quality, slower.",
-                    )
+                    # --- Output column ---
+                    with gr.Column(scale=1):
+                        output_img = gr.Image(type="pil", label="Result")
+                        status_md = gr.Markdown("Ready")
 
-                    mask_seed_input = gr.Number(
-                        value=-1,
-                        label="Seed (−1 = random)",
-                        precision=0,
-                    )
+            with gr.Tab("Auto-Segment", id="auto-seg"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        seg_editor = gr.ImageEditor(
+                            type="numpy",
+                            image_mode="RGBA",
+                            brush=gr.Brush(default_size=25, colors=["#ffffff"]),
+                            label="Room Photo",
+                            sources=["upload", "clipboard"],
+                        )
 
-                    mask_generate_btn = gr.Button("✨ Generate (Inpaint)", variant="primary")
+                        _seg_examples = _list_example_images()
+                        if _seg_examples:
+                            gr.Examples(
+                                examples=[[p] for p in _seg_examples],
+                                inputs=[seg_editor],
+                                label="Example Room Photos",
+                            )
 
-                # --- Output column ---
-                with gr.Column(scale=1):
-                    mask_output_img = gr.Image(type="pil", label="Result")
-                    mask_status_md = gr.Markdown("Draw a mask → set inpaint prompt → generate.")
+                        seg_btn = gr.Button("🔍 Auto-Segment (SAM)", variant="secondary")
+
+                    with gr.Column(scale=1):
+                        instance_html = gr.HTML(label="Select Objects")
+                        seg_state = gr.State(None)
+                        seg_selection = gr.Textbox(visible=False, value="[]")
+                        seg_summary = gr.Markdown("Upload a photo, then click Auto-Segment.")
+                        confirm_btn = gr.Button("✅ Confirm & Send → Masked Edit", variant="primary")
+
+            with gr.Tab("Masked Edit", id="masked"):
+                with gr.Row():
+                    # --- Input column ---
+                    with gr.Column(scale=1):
+                        mask_editor = gr.ImageEditor(
+                            type="numpy",
+                            image_mode="RGBA",
+                            brush=gr.Brush(default_size=25, colors=["#ffffff"]),
+                            label="Room Photo + Mask",
+                            sources=["upload", "clipboard"],
+                        )
+
+                        _masked_examples = _list_example_images()
+                        if _masked_examples:
+                            gr.Examples(
+                                examples=[[p] for p in _masked_examples],
+                                inputs=[mask_editor],
+                                label="Example Room Photos",
+                            )
+
+                        gr.Markdown("### Inpaint settings")
+                        inpaint_prompt_box = gr.Textbox(
+                            label="Inpaint Prompt",
+                            placeholder="What to fill the masked area with (e.g. 'clean empty room')…",
+                            lines=2,
+                        )
+
+                        inpaint_negative_box = gr.Textbox(
+                            label="Negative Prompt",
+                            placeholder="What to avoid in the inpainted area (optional)…",
+                            lines=2,
+                        )
+
+                        inpaint_strength_slider = gr.Slider(
+                            minimum=0.1,
+                            maximum=1.0,
+                            value=1.0,
+                            step=0.05,
+                            label="Inpaint Strength",
+                            info="How much to change the masked area. 1.0 = full replacement.",
+                        )
+
+                        inpaint_guidance_slider = gr.Slider(
+                            minimum=1.0,
+                            maximum=15.0,
+                            value=7.5,
+                            step=0.5,
+                            label="Guidance Scale",
+                            info="How closely to follow the prompt. Higher = more faithful.",
+                        )
+
+                        mask_dilate_slider = gr.Slider(
+                            minimum=0,
+                            maximum=30,
+                            value=10,
+                            step=1,
+                            label="Mask Dilation (px)",
+                            info="Expand mask edges to avoid hard seams. 0 = no dilation.",
+                        )
+
+                        mask_steps_slider = gr.Slider(
+                            minimum=10,
+                            maximum=50,
+                            value=25,
+                            step=1,
+                            label="Inference Steps",
+                            info="More steps = higher quality, slower.",
+                        )
+
+                        mask_seed_input = gr.Number(
+                            value=-1,
+                            label="Seed (−1 = random)",
+                            precision=0,
+                        )
+
+                        mask_generate_btn = gr.Button("✨ Generate (Inpaint)", variant="primary")
+
+                    # --- Output column ---
+                    with gr.Column(scale=1):
+                        mask_output_img = gr.Image(type="pil", label="Result")
+                        mask_status_md = gr.Markdown(
+                            "Draw a mask or use Auto-Segment tab → set inpaint prompt → generate."
+                        )
 
         # --- Events: Restyle tab ---
         preset_dd.change(
@@ -465,13 +579,28 @@ def build_ui() -> gr.Blocks:
             outputs=[output_img, status_md],
         )
 
-        # --- Events: Masked Edit tab ---
-        auto_seg_btn.click(
-            fn=on_auto_segment,
-            inputs=[mask_editor],
-            outputs=[mask_editor],
+        seg_btn.click(
+            fn=on_auto_segment_interactive,
+            inputs=[seg_editor],
+            outputs=[instance_html, seg_state],
         )
 
+        confirm_btn.click(
+            fn=None,
+            inputs=None,
+            outputs=seg_selection,
+            js="() => { const iframes = document.querySelectorAll('iframe'); for (const iframe of iframes) { try { const el = iframe.contentDocument && iframe.contentDocument.getElementById('instance-canvas-selection'); if (el && el.value) return el.value; } catch(e) {} } return '[]'; }",
+        ).then(
+            fn=on_confirm_selection,
+            inputs=[seg_selection, seg_state, seg_editor],
+            outputs=[mask_editor, mask_status_md],
+        ).then(
+            fn=lambda: gr.update(selected="masked"),
+            inputs=None,
+            outputs=tabs,
+        )
+
+        # --- Events: Masked Edit tab ---
         mask_generate_btn.click(
             fn=generate_masked,
             inputs=[

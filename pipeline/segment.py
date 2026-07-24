@@ -169,6 +169,84 @@ def segment_room(
     return masks
 
 
+def segment_room_detailed(
+    image: Image.Image,
+    predictor: "SamPredictor",
+    point_coords: list[tuple[int, int]] | None = None,
+    point_labels: list[int] | None = None,
+) -> list[dict]:
+    """Segment a room image, returning per-instance metadata.
+
+    Unlike :func:`segment_room`, this function preserves SAM's full metadata
+    (bounding box, area, predicted IoU) for each detected instance, making it
+    suitable for interactive instance-selection UIs.
+
+    Args:
+        image: Room photo (PIL Image, any mode — converted to RGB internally).
+        predictor: Pre-loaded ``SamPredictor``.
+        point_coords: Optional click points ``[(x, y), ...]`` for prompt-based seg.
+        point_labels: ``1`` = foreground, ``0`` = background for each point.
+
+    Returns:
+        List of dicts, each containing:
+        - ``id`` (int): Zero-based index sorted by area (largest first).
+        - ``mask`` (np.ndarray): Binary mask (H, W), bool dtype.
+        - ``bbox`` (list[float]): ``[x, y, w, h]`` bounding box.
+        - ``area`` (int): Number of pixels in the mask.
+        - ``score`` (float): SAM predicted IoU.
+    """
+    from segment_anything import SamPredictor as _SP  # noqa: F811 — type hint
+
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+
+    img_np = np.array(image)
+    predictor.set_image(img_np)
+
+    instances: list[dict] = []
+
+    if point_coords is not None:
+        coords_np = np.array(point_coords, dtype=np.float32)
+        labels_np = np.array(point_labels or [1] * len(point_coords), dtype=np.int32)
+        result_masks, scores, _ = predictor.predict(
+            point_coords=coords_np,
+            point_labels=labels_np,
+            multimask_output=True,
+        )
+        best_idx = int(np.argmax(scores))
+        best_mask = result_masks[best_idx]
+        instances.append({
+            "id": 0,
+            "mask": best_mask,
+            "bbox": [0, 0, best_mask.shape[1], best_mask.shape[0]],
+            "area": int(best_mask.sum()),
+            "score": float(scores[best_idx]),
+        })
+    else:
+        from segment_anything import SamAutomaticMaskGenerator
+
+        sam_model = predictor.model
+        amg = SamAutomaticMaskGenerator(sam_model)
+        amg_results = amg.generate(img_np)
+
+        for idx, entry in enumerate(
+            sorted(amg_results, key=lambda e: e["area"], reverse=True)
+        ):
+            mask = entry["segmentation"]
+            # SAM returns bbox as [x, y, w, h]
+            bbox = entry.get("bbox", [0, 0, mask.shape[1], mask.shape[0]])
+            instances.append({
+                "id": idx,
+                "mask": mask,
+                "bbox": list(bbox),
+                "area": int(entry["area"]),
+                "score": float(entry.get("predicted_iou", 0.0)),
+            })
+
+    logger.info("Detailed segmentation produced %d instance(s)", len(instances))
+    return instances
+
+
 def generate_mask(
     image: Image.Image,
     predictor: "SamPredictor",

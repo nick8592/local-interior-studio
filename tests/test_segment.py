@@ -127,9 +127,7 @@ class TestSegmentRoom:
         ]
 
         with patch("segment_anything.SamAutomaticMaskGenerator") as mock_amg_cls:
-            mock_amg = MagicMock()
-            mock_amg.return_value = amg_results
-            mock_amg_cls.return_value = mock_amg
+            mock_amg_cls.return_value.generate.return_value = amg_results
 
             masks = segment_room(image=sample_image, predictor=mock_predictor)
 
@@ -143,7 +141,7 @@ class TestSegmentRoom:
         mock_predictor.model = MagicMock()
 
         with patch("segment_anything.SamAutomaticMaskGenerator") as mock_amg_cls:
-            mock_amg_cls.return_value = MagicMock(return_value=[])
+            mock_amg_cls.return_value.generate.return_value = []
 
             masks = segment_room(image=rgba_image, predictor=mock_predictor)
 
@@ -155,6 +153,79 @@ class TestSegmentRoom:
 # ---------------------------------------------------------------------------
 # generate_mask tests
 # ---------------------------------------------------------------------------
+
+class TestSegmentRoomDetailed:
+    def test_auto_mask_generation_preserves_metadata(self, sample_image: Image.Image, fake_mask: np.ndarray) -> None:
+        from pipeline.segment import segment_room_detailed
+
+        mock_predictor = MagicMock()
+        mock_predictor.model = MagicMock()
+
+        amg_results = [
+            {"segmentation": fake_mask, "area": 2048, "bbox": [0, 0, 64, 32], "predicted_iou": 0.95},
+            {"segmentation": ~fake_mask, "area": 1024, "bbox": [0, 32, 64, 32], "predicted_iou": 0.88},
+        ]
+
+        with patch("segment_anything.SamAutomaticMaskGenerator") as mock_amg_cls:
+            mock_amg_cls.return_value.generate.return_value = amg_results
+
+            instances = segment_room_detailed(image=sample_image, predictor=mock_predictor)
+
+        assert len(instances) == 2
+        assert instances[0]["id"] == 0
+        assert instances[0]["area"] == 2048
+        assert instances[0]["score"] == 0.95
+        assert instances[0]["bbox"] == [0, 0, 64, 32]
+        np.testing.assert_array_equal(instances[0]["mask"], fake_mask)
+
+        assert instances[1]["id"] == 1
+        assert instances[1]["area"] == 1024
+
+    def test_point_prompt_returns_single_instance(self, sample_image: Image.Image, fake_mask: np.ndarray) -> None:
+        from pipeline.segment import segment_room_detailed
+
+        mock_predictor = MagicMock()
+        mock_predictor.predict.return_value = (
+            np.stack([fake_mask, ~fake_mask, fake_mask]),
+            np.array([0.9, 0.3, 0.1]),
+            None,
+        )
+
+        instances = segment_room_detailed(
+            image=sample_image,
+            predictor=mock_predictor,
+            point_coords=[(32, 32)],
+            point_labels=[1],
+        )
+
+        assert len(instances) == 1
+        assert instances[0]["id"] == 0
+        assert instances[0]["score"] == 0.9
+        assert "mask" in instances[0]
+        assert "bbox" in instances[0]
+        assert "area" in instances[0]
+
+    def test_sorted_by_area_descending(self, sample_image: Image.Image, fake_mask: np.ndarray) -> None:
+        from pipeline.segment import segment_room_detailed
+
+        mock_predictor = MagicMock()
+        mock_predictor.model = MagicMock()
+
+        small_mask = np.zeros((64, 64), dtype=bool)
+        small_mask[:4, :4] = True
+
+        amg_results = [
+            {"segmentation": small_mask, "area": 16, "bbox": [0, 0, 4, 4], "predicted_iou": 0.7},
+            {"segmentation": fake_mask, "area": 2048, "bbox": [0, 0, 64, 32], "predicted_iou": 0.95},
+        ]
+
+        with patch("segment_anything.SamAutomaticMaskGenerator") as mock_amg_cls:
+            mock_amg_cls.return_value.generate.return_value = amg_results
+
+            instances = segment_room_detailed(image=sample_image, predictor=mock_predictor)
+
+        assert instances[0]["area"] >= instances[1]["area"]
+
 
 class TestGenerateMask:
     def test_combines_masks(self, sample_image: Image.Image) -> None:
