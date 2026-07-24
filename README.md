@@ -18,8 +18,12 @@ Fully offline interior design tool that restyles room photos using a locally-run
 │               │     │  ┌───────────┐ │     │   Save)       │
 │  Upload photo │     │  │ Instruct- │ │     │               │
 │  Pick style   │     │  │ Pix2Pix   │ │     │               │
-│  View result  │     │  │ (local)   │ │ │     │               │
-└──────────────┘     │  └───────────┘ │     └──────────────┘
+│  Draw mask    │     │  │ (local)   │ │     │               │
+│  View result  │     │  └───────────┘ │     │               │
+└──────────────┘     │  ┌───────────┐ │     └──────────────┘
+                     │  │ SD        │ │
+                     │  │ Inpaint   │ │
+                     │  └───────────┘ │
                      │  ┌───────────┐ │
                      │  │ SAM       │ │
                      │  │ Segment   │ │
@@ -38,7 +42,7 @@ Fully offline interior design tool that restyles room photos using a locally-run
 | **Inpainting model** | Restyle masked region only | Stable Diffusion Inpainting (~4 GB VRAM) via `pipeline/inpaint.py` |
 | **Room segmentation** | Auto-detect walls, floor, furniture | Segment Anything (SAM) via `pipeline/segment.py` |
 | **Style presets** | Curated prompt templates | 10 presets in `pipeline/presets.py` |
-| **Image utilities** | Resize, pad, color-space, mask overlay | `utils/image.py` |
+| **Image utilities** | Resize, pad, color-space, mask overlay, mask extraction, unpad, save | `utils/image.py` |
 | **Web UI** | Upload → pick style → generate | Gradio Blocks via `app.py` |
 
 ### Model selection rationale
@@ -81,10 +85,11 @@ local-interior-studio/
 │   └── presets.py          # Style prompt templates (10 presets)
 ├── models/
 │   └── README.md           # Download instructions (auto-download on first run)
+├── examples/               # Example room photos (shown in Gradio UI)
 ├── output/                 # Generated images (mounted volume)
 ├── utils/
 │   ├── __init__.py
-│   └── image.py            # Resize, pad, color-space, mask overlay, mask extraction helpers
+│   └── image.py            # Resize, pad, unpad, color-space, mask overlay, mask extraction, save helpers
 └── tests/
     ├── __init__.py
     ├── test_edit.py         # Unit tests for edit pipeline (mocked)
@@ -134,6 +139,7 @@ Copy `.env.example` to `.env` and adjust:
 | `DEFAULT_STEPS` | `20` | Diffusion inference steps |
 | `DEFAULT_GUIDANCE_SCALE` | `7.5` | Text prompt adherence |
 | `DEFAULT_IMAGE_GUIDANCE_SCALE` | `1.5` | Edit strength (1.0–3.0) |
+| `DEFAULT_STRENGTH` | `1.0` | Inpaint strength (0.1–1.0) |
 | `OUTPUT_DIR` | `output` | Where generated images are saved |
 | `SERVER_NAME` | `0.0.0.0` | Gradio server bind address |
 | `SERVER_PORT` | `7860` | Gradio server port |
@@ -142,7 +148,7 @@ Copy `.env.example` to `.env` and adjust:
 
 The entire user interaction flows through a **Gradio** web UI served at `http://localhost:7860`. No separate frontend needed — Gradio handles image upload, style selection, and result display in a single browser tab.
 
-### Image editing tab (v0.2 — implemented)
+### Masked Edit tab (v0.2 — implemented)
 
 Upload a room photo → paint a mask on the areas you want to edit (or click **Auto-Segment** to let SAM detect regions) → describe what to fill the masked area with → adjust inpaint settings and click **Generate (Inpaint)** → view and download the result with only the masked region changed.
 
@@ -179,7 +185,7 @@ Upload a room photo → pick a style preset or write a custom prompt → adjust 
 | Tab | Status | Workflow |
 |---|---|---|
 | **Restyle** | ✅ Implemented | Upload → pick style → generate (style change only) |
-| **Image editing** | ✅ Implemented | Auto-segment → draw mask → inpaint masked area (editing only, no style change) |
+| **Masked Edit** | ✅ Implemented | Auto-segment → draw mask → inpaint masked area (editing only, no style change) |
 
 
 ### Available style presets
@@ -211,11 +217,15 @@ Upload a room photo → pick a style preset or write a custom prompt → adjust 
 services:
   app:
     build: .
+    container_name: local-interior-studio
     ports:
       - "7860:7860"
     volumes:
       - ./models:/app/models
       - ./output:/app/output
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - DEVICE=auto
     deploy:
       resources:
         reservations:
