@@ -45,10 +45,10 @@ The tool uses a 3-tab workflow to move from global styling to precise object edi
 | Tab | Purpose | Key Controls | Status |
 |---|---|---|---|
 | **Restyle** | Global room style change | Style presets, Custom prompt, Edit strength | ✅ Implemented |
-| **Auto-Segment** | Interactive object selection | SAM auto-segment, Multi-select canvas | ✅ Implemented |
-| **Masked Edit** | Precise regional editing | Brush mask, Inpaint prompt, Strength | ✅ Implemented |
+| **Auto-Segment** | Object selection + direct inpainting | SAM auto-segment, Multi-select canvas, Inpaint prompt | ✅ Implemented |
+| **Masked Edit** | Manual brush-based inpainting | Brush mask, Inpaint prompt, Strength | ✅ Implemented |
 
-The **Auto-Segment** tab features an interactive HTML5 canvas that allows users to hover over detected objects for info and click to select multiple regions before sending them to the Masked Edit tab.
+The **Auto-Segment** tab features an interactive HTML5 canvas that allows users to hover over detected objects for info and click to select multiple regions. Selected objects are listed with color swatches and area percentages. Users can inpaint directly on the same page without switching tabs. The **Masked Edit** tab remains available for manual brush-drawn masks.
 
 ## Hardware Requirements
 
@@ -151,6 +151,7 @@ Tests use mocked ML objects and run without GPU or internet access.
 - [x] **v0.1 — Proof of concept** — single-image restyle with InstructPix2Pix + Gradio UI (Restyle tab)
 - [x] **v0.2 — Image editing (inpainting)** — SAM segmentation + user-drawn mask + Stable Diffusion Inpainting (Masked edit tab)
 - [x] **v0.3 — Interactive auto-segment** — Interactive instance canvas with hover/select and mask transfer
+- [x] **v0.4 — Direct inpaint in Auto-Segment** — Select objects on panoptic overlay, inpaint directly without tab-switch; selected-objects list with color swatches; Mask-Edit retained for manual brush workflow
 
 ## License
 

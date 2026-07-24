@@ -17,7 +17,9 @@ import numpy as np
 
 __all__ = [
     "encode_mask_rle",
+    "instance_color_hex",
     "render_instance_selector_html",
+    "render_selected_objects_html",
 ]
 
 _CANVAS_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
@@ -70,6 +72,15 @@ def _instance_color(idx: int, total: int) -> tuple[int, int, int]:
 
 def _to_hex(rgb: tuple[int, int, int]) -> str:
     return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
+def instance_color_hex(idx: int, total: int) -> str:
+    """Return the deterministic hex color string for instance ``idx``.
+
+    Mirrors the color used by ``render_instance_selector_html`` so the
+    server-side selected-objects list matches the canvas overlay swatches.
+    """
+    return _to_hex(_instance_color(idx, total))
 
 
 def _safe_json(data: Any) -> str:
@@ -316,6 +327,7 @@ _HTML_TEMPLATE = """<div id="{CONTAINER_ID}" class="isc-root">
     input.dispatchEvent(new Event('input', {{ bubbles: true }}));
     input.dispatchEvent(new Event('change', {{ bubbles: true }}));
     try {{ localStorage.setItem('{CANVAS_ID}-selection', v); }} catch(e) {{}}
+    try {{ window.parent.postMessage({{ source: '{CANVAS_ID}', selection: v }}, '*'); }} catch(e) {{}}
   }}
 
   function render() {{
@@ -444,3 +456,93 @@ _HTML_TEMPLATE = """<div id="{CONTAINER_ID}" class="isc-root">
 </script>
 </div>
 """
+
+
+_EMPTY_PLACEHOLDER_HTML = (
+    "<div style='padding:10px 12px;color:#888;font-style:italic;"
+    "font:13px/1.4 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,sans-serif'>"
+    "Click objects on the canvas above to select them.</div>"
+)
+
+_NO_OBJECTS_PLACEHOLDER_HTML = (
+    "<div style='padding:10px 12px;color:#888;font-style:italic;"
+    "font:13px/1.4 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,sans-serif'>"
+    "Run Auto-Segment to detect objects.</div>"
+)
+
+
+def _area_pct_for(inst: dict) -> float:
+    """Best-effort percentage of image area covered by an instance dict."""
+    if "areaPct" in inst and inst["areaPct"] is not None:
+        try:
+            return float(inst["areaPct"])
+        except (TypeError, ValueError):
+            pass
+    area = int(inst.get("area", 0))
+    height = int(inst.get("height", 0))
+    width = int(inst.get("width", 0))
+    total = max(height * width, 1)
+    return area / total * 100.0 if total else 0.0
+
+
+def render_selected_objects_html(
+    instances: list[dict],
+    selected_ids: list[int] | None,
+) -> str:
+    """Build an HTML block listing the currently selected instances.
+
+    Args:
+        instances: List of instance dicts. Each must contain ``id`` (int) and
+            ``colorHex`` (str). ``areaPct`` (float) is preferred; otherwise
+            ``area`` + ``height`` * ``width`` will be used to compute the
+            percentage.
+        selected_ids: List of instance ids currently selected on the canvas.
+            Unknown ids are ignored. An empty list renders an empty-state
+            placeholder.
+
+    Returns:
+        An HTML fragment suitable for ``gr.HTML(value=...)``. Uses inline
+        styles only — Gradio's HTML renderer strips ``<style>`` blocks in
+        values that share a sandbox with the surrounding page.
+    """
+    if not instances:
+        return _NO_OBJECTS_PLACEHOLDER_HTML
+
+    selected_set = {int(i) for i in (selected_ids or [])}
+    selected = [inst for inst in instances if int(inst.get("id", -1)) in selected_set]
+    selected.sort(key=lambda inst: int(inst["id"]))
+
+    if not selected:
+        return _EMPTY_PLACEHOLDER_HTML
+
+    header = (
+        f"<div style='padding:4px 8px 6px 8px;color:#bbb;"
+        f"font:12px/1.3 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,sans-serif'>"
+        f"{len(selected)} object{'s' if len(selected) != 1 else ''} selected</div>"
+    )
+
+    rows: list[str] = []
+    for inst in selected:
+        iid = int(inst["id"])
+        color = html.escape(str(inst.get("colorHex", "#888888")), quote=True)
+        area_pct = _area_pct_for(inst)
+        label = f"Object {iid + 1}"
+        rows.append(
+            "<div style='display:flex;align-items:center;gap:10px;"
+            "padding:7px 10px;margin:3px 0;border-radius:5px;"
+            "background:#1f1f23;color:#eee;"
+            "font:13px/1.3 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,sans-serif'>"
+            f"<span style='display:inline-block;width:18px;height:18px;"
+            f"border-radius:4px;background:{color};"
+            f"border:1px solid rgba(255,255,255,0.25);flex-shrink:0'></span>"
+            f"<span style='flex:1'>{label}</span>"
+            f"<span style='color:#aaa;font-variant-numeric:tabular-nums'>{area_pct:.1f}%</span>"
+            "</div>"
+        )
+
+    return (
+        "<div style='margin:2px 0'>"
+        + header
+        + "".join(rows)
+        + "</div>"
+    )

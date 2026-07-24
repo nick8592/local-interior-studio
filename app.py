@@ -7,6 +7,7 @@ a locally-runnable InstructPix2Pix model.
 from __future__ import annotations
 
 import base64
+import gc
 import io
 import json
 import logging
@@ -16,10 +17,16 @@ from typing import Optional
 
 import gradio as gr
 import numpy as np
+import torch
 from dotenv import load_dotenv
 from PIL import Image
 
-from components.instance_selector import encode_mask_rle, render_instance_selector_html
+from components.instance_selector import (
+    encode_mask_rle,
+    instance_color_hex,
+    render_instance_selector_html,
+    render_selected_objects_html,
+)
 from pipeline.edit import edit_image, get_device, load_edit_model
 from pipeline.inpaint import inpaint_image, load_inpaint_model
 from pipeline.presets import get_preset, get_preset_names
@@ -56,37 +63,81 @@ def _list_example_images() -> list[str]:
     )
 
 # ---------------------------------------------------------------------------
-# Global model cache
+# Model cache
 # ---------------------------------------------------------------------------
 _pipeline = None
 _inpaint_pipeline = None
 _segment_predictor = None
+_active_model: str | None = None
+
+
+def _reclaim_memory():
+    """Force-release GPU and system memory after deleting a model."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+    logger.info("Memory reclaimed (gc + CUDA cache cleared)")
+
+
+def _swap_to_model(target: str):
+    """Ensure only *target* model is loaded; delete all others.
+
+    Valid targets: "edit", "inpaint", "segment".
+    """
+    global _pipeline, _inpaint_pipeline, _segment_predictor, _active_model
+
+    if _active_model == target:
+        return
+
+    if target != "edit" and _pipeline is not None:
+        logger.info("Deleting edit pipeline to free memory")
+        del _pipeline
+        _pipeline = None
+
+    if target != "inpaint" and _inpaint_pipeline is not None:
+        logger.info("Deleting inpaint pipeline to free memory")
+        del _inpaint_pipeline
+        _inpaint_pipeline = None
+
+    if target != "segment" and _segment_predictor is not None:
+        logger.info("Deleting SAM predictor to free memory")
+        del _segment_predictor
+        _segment_predictor = None
+
+    _reclaim_memory()
 
 
 def _ensure_model():
-    """Lazily load the edit model on first request."""
-    global _pipeline
+    """Load the edit model, deleting others if needed."""
+    global _pipeline, _active_model
+    _swap_to_model("edit")
     if _pipeline is None:
-        logger.info("Loading model (first run)…")
+        logger.info("Loading edit model…")
         _pipeline = load_edit_model()
+    _active_model = "edit"
     return _pipeline
 
 
 def _ensure_inpaint_model():
-    """Lazily load the inpaint model on first request."""
-    global _inpaint_pipeline
+    """Load the inpaint model, deleting others if needed."""
+    global _inpaint_pipeline, _active_model
+    _swap_to_model("inpaint")
     if _inpaint_pipeline is None:
-        logger.info("Loading inpaint model (first run)…")
+        logger.info("Loading inpaint model…")
         _inpaint_pipeline = load_inpaint_model()
+    _active_model = "inpaint"
     return _inpaint_pipeline
 
 
 def _ensure_segment_model():
-    """Lazily load the SAM segmentation model on first request."""
-    global _segment_predictor
+    """Load the SAM model, deleting others if needed."""
+    global _segment_predictor, _active_model
+    _swap_to_model("segment")
     if _segment_predictor is None:
-        logger.info("Loading segmentation model (first run)…")
+        logger.info("Loading SAM model…")
         _segment_predictor = load_segmentation_model()
+    _active_model = "segment"
     return _segment_predictor
 
 
@@ -129,7 +180,6 @@ def generate(
 
     pipe = _ensure_model()
 
-    # Preprocess
     source = to_rgb(source_image)
     original_size = source.size
     source, scale = resize_for_model(source, max_size=768)
@@ -156,8 +206,10 @@ def generate(
     return result, f"Done — saved to `{saved_path}`"
 
 
-def on_auto_segment_interactive(editor_value: dict | tuple | None) -> tuple[str, list[dict]]:
-    """Run SAM segmentation and return HTML for InstanceSelector + instance state."""
+def on_auto_segment_interactive(
+    editor_value: dict | tuple | None,
+) -> tuple[str, list[dict], str, str]:
+    """Run SAM segmentation and return HTML canvas + instance state + empty selection list + reset selection JSON."""
     if editor_value is None:
         raise gr.Error("Please upload a room photo first.")
 
@@ -194,8 +246,6 @@ def on_auto_segment_interactive(editor_value: dict | tuple | None) -> tuple[str,
 
     canvas_w, canvas_h = canvas_source.size
     original_w, original_h = original_size
-    scale_to_orig_x = original_w / canvas_w
-    scale_to_orig_y = original_h / canvas_h
 
     frontend_instances = []
     for inst in instances:
@@ -216,22 +266,54 @@ def on_auto_segment_interactive(editor_value: dict | tuple | None) -> tuple[str,
             return np.array(mask_img) > 127
         return mask
 
-    state_instances = [
-        {"id": inst["id"], "mask": _to_original_res(inst["mask"])}
-        for inst in instances
-    ]
+    canvas_total_pixels = max(canvas_w * canvas_h, 1)
+    total = len(instances)
+    state_instances: list[dict] = []
+    for idx, inst in enumerate(instances):
+        area_canvas = int(inst["area"])
+        area_pct = area_canvas / canvas_total_pixels * 100.0
+        state_instances.append({
+            "id": int(inst["id"]),
+            "mask": _to_original_res(inst["mask"]),
+            "colorHex": instance_color_hex(idx, total),
+            "areaPct": area_pct,
+        })
 
     html_str = render_instance_selector_html(image_data_url, frontend_instances)
+    selected_html = render_selected_objects_html(state_instances, [])
 
-    return html_str, state_instances
+    return html_str, state_instances, selected_html, "[]"
 
 
-def on_confirm_selection(
+def on_refresh_selection(
+    selection_json: str,
+    instance_state: list[dict] | None,
+) -> str:
+    """Re-render the selected-objects HTML from the canvas's localStorage state."""
+    if not instance_state:
+        return render_selected_objects_html([], [])
+
+    try:
+        selected_ids = json.loads(selection_json)
+    except (json.JSONDecodeError, TypeError):
+        selected_ids = []
+
+    return render_selected_objects_html(instance_state, selected_ids)
+
+
+def on_auto_segment_inpaint(
     selection_json: str,
     instance_state: list[dict] | None,
     editor_value: dict | tuple | None,
-) -> tuple[dict, str]:
-    """Combine selected instance masks and send to Masked Edit tab."""
+    inpaint_prompt: str,
+    negative_prompt: str,
+    inpaint_strength: float,
+    guidance_scale: float,
+    num_steps: int,
+    seed: int,
+    dilate_kernel: int,
+) -> tuple[Optional[Image.Image], str, str]:
+    """Combine selected instance masks, dilate, and run inpainting on the result."""
     if instance_state is None or not instance_state:
         raise gr.Error("Run Auto-Segment first to detect objects.")
 
@@ -241,7 +323,10 @@ def on_confirm_selection(
         selected_ids = []
 
     if not selected_ids:
-        raise gr.Error("Select at least one object before confirming.")
+        raise gr.Error("Select at least one object on the canvas before inpainting.")
+
+    if not inpaint_prompt.strip():
+        raise gr.Error("Enter an inpaint prompt describing what to fill the region with.")
 
     bg_arr = None
     if isinstance(editor_value, dict):
@@ -252,15 +337,17 @@ def on_confirm_selection(
         bg_arr = np.asarray(editor_value[0]) if editor_value[0] is not None else None
 
     if bg_arr is None:
-        raise gr.Error("Could not extract source image.")
+        raise gr.Error("Could not extract source image from editor.")
 
     source = Image.fromarray(bg_arr)
     if source.mode != "RGB":
         source = source.convert("RGB")
 
-    h, w = source.size[::-1]
+    original_size = source.size
+    h, w = original_size[::-1]
 
     combined = np.zeros((h, w), dtype=bool)
+    matched = 0
     for inst in instance_state:
         if inst["id"] in selected_ids:
             mask = inst["mask"]
@@ -269,21 +356,61 @@ def on_confirm_selection(
                 mask_img = mask_img.resize((w, h), Image.Resampling.LANCZOS)
                 mask = np.array(mask_img) > 127
             combined = np.logical_or(combined, mask)
+            matched += 1
 
-    mask_img = dilate_mask(Image.fromarray((combined.astype(np.uint8) * 255)), kernel_size=10)
-    mask_np = np.array(mask_img)
+    if matched == 0:
+        raise gr.Error("Selected ids did not match any segmented objects.")
 
-    bg_arr = np.array(source)
+    mask_for_dilation = Image.fromarray((combined.astype(np.uint8) * 255))
+    if dilate_kernel > 0:
+        mask_for_dilation = dilate_mask(mask_for_dilation, kernel_size=dilate_kernel)
+    if mask_for_dilation.mode != "L":
+        mask_for_dilation = mask_for_dilation.convert("L")
 
-    # RGBA mask layer: white pixels where mask is active, transparent elsewhere.
-    mask_layer = np.zeros((h, w, 4), dtype=np.uint8)
-    mask_layer[..., :3] = 255
-    mask_layer[..., 3] = mask_np
+    source_resized, scale = resize_for_model(source, max_size=768)
+    if mask_for_dilation.size != source_resized.size:
+        mask_for_dilation = mask_for_dilation.resize(
+            source_resized.size, Image.Resampling.LANCZOS
+        )
 
-    editor_dict = {"background": bg_arr, "layers": [mask_layer], "composite": bg_arr}
-    summary = f"Sent {len(selected_ids)} object(s) to Masked Edit"
+    inpaint_pipe = _ensure_inpaint_model()
 
-    return editor_dict, summary
+    fill_prompt = inpaint_prompt.strip()
+
+    logger.info(
+        "Auto-seg inpaint: prompt='%s…', strength=%.2f, guidance=%.2f, steps=%d, "
+        "seed=%d, dilate=%d, objects=%d",
+        fill_prompt[:60], inpaint_strength, guidance_scale, num_steps,
+        seed, dilate_kernel, matched,
+    )
+
+    result = inpaint_image(
+        pipeline=inpaint_pipe,
+        image=source_resized,
+        mask=mask_for_dilation,
+        prompt=fill_prompt,
+        negative_prompt=negative_prompt,
+        num_inference_steps=num_steps,
+        guidance_scale=guidance_scale,
+        strength=inpaint_strength,
+        seed=seed,
+    )
+
+    if scale < 1.0 and result.size != original_size:
+        result = result.resize(original_size, Image.Resampling.LANCZOS)
+        logger.info("Upscaled output back to original size %s", original_size)
+
+    saved_path = save_output(
+        result, output_dir=OUTPUT_DIR, base_name="auto_seg_inpaint"
+    )
+
+    selected_html = render_selected_objects_html(instance_state, selected_ids)
+    status = (
+        f"Done — saved to `{saved_path}` "
+        f"(inpainted {matched} object{'s' if matched != 1 else ''})"
+    )
+
+    return result, status, selected_html
 
 
 def generate_masked(
@@ -367,9 +494,31 @@ def build_ui() -> gr.Blocks:
 
     preset_names = get_preset_names()
 
+    _bridge_js = (
+        "<script>\n"
+        "window.addEventListener('message', function(e) {\n"
+        "  if (e.data && e.data.source === 'instance-canvas' && "
+        "typeof e.data.selection === 'string') {\n"
+        "    var box = document.querySelector('#seg_selection_json textarea');\n"
+        "    if (!box) box = document.querySelector("
+        "'[data-testid*=\"seg_selection_json\"] textarea');\n"
+        "    if (!box) box = document.querySelector("
+        "'input[name=\"seg_selection_json\"]');\n"
+        "    if (box) {\n"
+        "      var nativeSetter = Object.getOwnPropertyDescriptor("
+        "window.HTMLTextAreaElement.prototype, 'value').set;\n"
+        "      nativeSetter.call(box, e.data.selection);\n"
+        "      box.dispatchEvent(new Event('input', {bubbles:true}));\n"
+        "    }\n"
+        "  }\n"
+        "});\n"
+        "</script>"
+    )
+
     with gr.Blocks(
         title="Local Interior Studio",
         theme=gr.themes.Soft(),
+        head=_bridge_js,
     ) as demo:
         gr.Markdown(
             "# 🏠 Local Interior Studio\n"
@@ -447,7 +596,10 @@ def build_ui() -> gr.Blocks:
                         status_md = gr.Markdown("Ready")
 
             with gr.Tab("Auto-Segment", id="auto-seg"):
+                seg_state = gr.State(None)
+
                 with gr.Row():
+                    # --- Left column: input + selection + inpaint controls ---
                     with gr.Column(scale=1):
                         seg_editor = gr.ImageEditor(
                             type="numpy",
@@ -467,11 +619,92 @@ def build_ui() -> gr.Blocks:
 
                         seg_btn = gr.Button("🔍 Auto-Segment (SAM)", variant="secondary")
 
+                        instance_html = gr.HTML(
+                            value=(
+                                "<div style=\"padding:14px;color:#888;font-style:italic;"
+                                "text-align:center\">Upload a photo, then click Auto-Segment.</div>"
+                            ),
+                            label="Select Objects",
+                        )
+
+                        selected_objects_html = gr.HTML(
+                            value=(
+                                "<div style='padding:10px 12px;color:#888;font-style:italic'>"
+                                "Click objects on the canvas above to select them.</div>"
+                            ),
+                            label="Selected Objects",
+                        )
+
+                        seg_selection_json = gr.Textbox(value="[]", visible=False, elem_id="seg_selection_json")
+
+                        gr.Markdown("### Inpaint settings")
+                        seg_inpaint_prompt_box = gr.Textbox(
+                            label="Inpaint Prompt",
+                            placeholder=(
+                                "What to fill the selected region with "
+                                "(e.g. 'clean empty room')…"
+                            ),
+                            lines=2,
+                        )
+
+                        seg_inpaint_negative_box = gr.Textbox(
+                            label="Negative Prompt",
+                            placeholder="What to avoid in the inpainted area (optional)…",
+                            lines=2,
+                        )
+
+                        seg_inpaint_strength_slider = gr.Slider(
+                            minimum=0.1,
+                            maximum=1.0,
+                            value=1.0,
+                            step=0.05,
+                            label="Inpaint Strength",
+                            info="How much to change the masked area. 1.0 = full replacement.",
+                        )
+
+                        seg_inpaint_guidance_slider = gr.Slider(
+                            minimum=1.0,
+                            maximum=15.0,
+                            value=7.5,
+                            step=0.5,
+                            label="Guidance Scale",
+                            info="How closely to follow the prompt. Higher = more faithful.",
+                        )
+
+                        seg_mask_dilate_slider = gr.Slider(
+                            minimum=0,
+                            maximum=30,
+                            value=10,
+                            step=1,
+                            label="Mask Dilation (px)",
+                            info="Expand mask edges to avoid hard seams. 0 = no dilation.",
+                        )
+
+                        seg_mask_steps_slider = gr.Slider(
+                            minimum=10,
+                            maximum=50,
+                            value=25,
+                            step=1,
+                            label="Inference Steps",
+                            info="More steps = higher quality, slower.",
+                        )
+
+                        seg_inpaint_seed_input = gr.Number(
+                            value=-1,
+                            label="Seed (−1 = random)",
+                            precision=0,
+                        )
+
+                        inpaint_btn = gr.Button(
+                            "✨ Inpaint Selected", variant="primary"
+                        )
+
+                    # --- Right column: inpaint result ---
                     with gr.Column(scale=1):
-                        instance_html = gr.HTML(label="Select Objects")
-                        seg_state = gr.State(None)
-                        seg_summary = gr.Markdown("Upload a photo, then click Auto-Segment.")
-                        confirm_btn = gr.Button("✅ Confirm & Send → Masked Edit", variant="primary")
+                        inpaint_result_img = gr.Image(type="pil", label="Inpaint Result")
+                        inpaint_status_md = gr.Markdown(
+                            "Ready — segment, select objects, then click Inpaint Selected."
+                        )
 
             with gr.Tab("Masked Edit", id="masked"):
                 with gr.Row():
@@ -554,7 +787,7 @@ def build_ui() -> gr.Blocks:
                     with gr.Column(scale=1):
                         mask_output_img = gr.Image(type="pil", label="Result")
                         mask_status_md = gr.Markdown(
-                            "Draw a mask or use Auto-Segment tab → set inpaint prompt → generate."
+                            "Draw a mask on the image, set inpaint prompt, then generate."
                         )
 
         # --- Events: Restyle tab ---
@@ -581,18 +814,30 @@ def build_ui() -> gr.Blocks:
         seg_btn.click(
             fn=on_auto_segment_interactive,
             inputs=[seg_editor],
-            outputs=[instance_html, seg_state],
+            outputs=[instance_html, seg_state, selected_objects_html, seg_selection_json],
         )
 
-        confirm_btn.click(
-            fn=on_confirm_selection,
-            inputs=[seg_state, seg_editor],
-            outputs=[mask_editor, mask_status_md],
-            js="(state, editor) => { try { var v = localStorage.getItem('instance-canvas-selection'); return [v || '[]', state, editor]; } catch(e) { return ['[]', state, editor]; } }",
-        ).then(
-            fn=lambda: gr.update(selected="masked"),
-            inputs=None,
-            outputs=tabs,
+        seg_selection_json.change(
+            fn=on_refresh_selection,
+            inputs=[seg_selection_json, seg_state],
+            outputs=[selected_objects_html],
+        )
+
+        inpaint_btn.click(
+            fn=on_auto_segment_inpaint,
+            inputs=[
+                seg_selection_json,
+                seg_state,
+                seg_editor,
+                seg_inpaint_prompt_box,
+                seg_inpaint_negative_box,
+                seg_inpaint_strength_slider,
+                seg_inpaint_guidance_slider,
+                seg_mask_steps_slider,
+                seg_inpaint_seed_input,
+                seg_mask_dilate_slider,
+            ],
+            outputs=[inpaint_result_img, inpaint_status_md, selected_objects_html],
         )
 
         # --- Events: Masked Edit tab ---
