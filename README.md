@@ -43,7 +43,7 @@ Fully offline interior design tool that restyles room photos using a locally-run
 | **Room segmentation** | Auto-detect and select individual objects in a room | Segment Anything (SAM) via `pipeline/segment.py` |
 | **Style presets** | Curated prompt templates | 10 presets in `pipeline/presets.py` |
 | **Image utilities** | Resize, pad, color-space, mask overlay, mask extraction, unpad, save | `utils/image.py` |
-| **Web UI** | Upload → pick style → generate / select objects → inpaint | Gradio Blocks + custom `InstanceSelector` component via `app.py` |
+| **Web UI** | Upload → pick style → generate / select objects → inpaint | Gradio Blocks + interactive instance canvas (`gr.HTML` + iframe) via `app.py` |
 
 ### Model selection rationale
 
@@ -78,14 +78,8 @@ local-interior-studio/
 ├── requirements.txt
 ├── app.py                  # Gradio web UI entry point
 ├── components/
-│   └── instance_selector/  # Custom Gradio component — interactive instance selection canvas
-│       ├── __init__.py
-│       ├── instance_selector.py
-│       └── frontend/
-│           ├── InstanceSelector.svelte
-│           ├── canvas-renderer.ts
-│           ├── hit-test.ts
-│           └── package.json
+│   ├── __init__.py
+│   └── instance_selector.py  # Interactive instance selection canvas (gr.HTML + iframe)
 ├── pipeline/
 │   ├── __init__.py
 │   ├── edit.py             # InstructPix2Pix inference wrapper
@@ -174,9 +168,9 @@ This tab is for **image editing only** (adding, removing, or replacing objects v
 | Mask Dilation | `gr.Slider` | 0 – 30 px (default 10) |
 | Seed | `gr.Number` | −1 = random |
 
-### Auto-Segment tab (v0.3 — planned)
+### Auto-Segment tab (v0.3 — implemented)
 
-Upload a room photo → click **Auto-Segment** → SAM detects all objects and renders them as interactive instance outlines on the image → **hover** over any instance to highlight it with a label tooltip (e.g. "Object 3 — 12.4% of image") → **click** to select (multi-select supported) → selected instances show a solid semi-transparent fill; unselected instances are dimmed → review selection in the summary panel → click **Confirm & Send → Masked Edit** to combine the selected masks and switch to the Masked Edit tab for inpainting.
+Upload a room photo → click **Auto-Segment** → SAM detects all objects and renders them as interactive panoptic outlines on the image → **hover** over any instance to highlight it with a label tooltip (e.g. "Object 3 — 12.4% of image") → **click** to select (multi-select supported) → selected instances show a solid semi-transparent fill; unselected instances are dimmed → click **Confirm & Send → Masked Edit** to combine the selected masks and switch to the Masked Edit tab for inpainting.
 
 This tab is for **object selection via SAM**. It replaces the previous "Auto-Segment" button that was inside the Masked Edit tab, providing a richer interactive experience with per-instance selection, hover feedback, and multi-select before sending masks to inpainting.
 
@@ -184,8 +178,7 @@ This tab is for **object selection via SAM**. It replaces the previous "Auto-Seg
 |---|---|---|
 | Source photo | `gr.ImageEditor` (upload/clipboard) | — |
 | Auto-Segment | Button (SAM) | — |
-| Instance overlay | `InstanceSelector` (custom Gradio component — HTML5 Canvas + JS) | — |
-| Selection summary | Summary panel (auto-generated) | — |
+| Instance overlay | `gr.HTML` + iframe (HTML5 Canvas, vanilla JS) | — |
 | Confirm & Send | Button | → switches to Masked Edit tab |
 
 ### Restyle tab (v0.1 — implemented)
@@ -202,23 +195,23 @@ Upload a room photo → pick a style preset or write a custom prompt → adjust 
 | Inference steps | `gr.Slider` | 10 – 50 (default 20) |
 | Seed | `gr.Number` | −1 = random |
 
-### Planned tabs
+### Tabs
 
 | Tab | Status | Workflow |
 |---|---|---|
 | **Restyle** | ✅ Implemented | Upload → pick style → generate (style change only) |
-| **Auto-Segment** | 🔲 Planned (v0.3) | Upload → SAM detects instances → hover/click to select objects → confirm → send mask to Masked Edit |
+| **Auto-Segment** | ✅ Implemented | Upload → SAM detects instances → hover/click to select objects → confirm → send mask to Masked Edit |
 | **Masked Edit** | ✅ Implemented | Draw mask (or receive from Auto-Segment) → inpaint masked area (editing only, no style change) |
 
-### InstanceSelector — custom Gradio component (v0.3)
+### InstanceSelector — interactive instance canvas (v0.3)
 
-The Auto-Segment tab uses a **custom Gradio component** (`InstanceSelector`) built with HTML5 Canvas + Svelte/TypeScript. Standard Gradio components cannot render interactive per-instance overlays with hover highlighting and click selection.
+The Auto-Segment tab uses an **interactive HTML5 Canvas** rendered via `gr.HTML()` wrapped in an `<iframe srcdoc>`. This workaround is needed because Gradio 4.19.2 strips `<script>` tags from `innerHTML` — the iframe preserves the full JS runtime.
 
 **Component behavior:**
 
 | State | Visual |
 |---|---|
-| Initial (after segmentation) | Room photo with thin colored outlines around each detected instance (~20% opacity) |
+| Initial (after segmentation) | Room photo with thin colored panoptic outlines around each detected instance (~20% opacity) |
 | Hover (unselected) | Hovered instance: outline thickens, fill opacity rises to ~40%, tooltip appears ("Object N — X% of image") |
 | Hover (already selected) | Slight brightness increase on the selected instance |
 | Selected | Solid semi-transparent fill (~60% opacity) in the instance's assigned color |
@@ -226,10 +219,11 @@ The Auto-Segment tab uses a **custom Gradio component** (`InstanceSelector`) bui
 
 **Data flow:**
 
-1. Backend (`segment_room_detailed()`) returns per-instance JSON payload: `{ image_url, instances: [{ id, mask_rle, bbox, area, score }] }`
-2. Frontend decodes RLE masks via `pako` decompression for instant client-side hit testing (no round-trip on hover)
-3. User toggles selection → component outputs `{ selected_ids: [3, 5] }`
-4. Confirm step combines selected masks → sends as `mask_editor` value → switches to Masked Edit tab
+1. Backend (`segment_room_detailed()`) returns per-instance payload: `{ image_url, instances: [{ id, mask_rle, bbox, area, score }] }`
+2. Frontend decodes RLE masks for instant client-side hit testing (no round-trip on hover)
+3. Edge-detection outline canvases are built from decoded masks for panoptic-style outlines
+4. User toggles selection → `localStorage` updated with selected IDs (e.g. `[0, 3]`)
+5. Confirm button JS reads `localStorage` → passes value to Python handler → combines masks → switches to Masked Edit tab
 
 
 ### Available style presets
@@ -291,7 +285,7 @@ Tests use mocked ML objects and run without GPU, model downloads, or internet ac
 
 - [x] **v0.1 — Proof of concept** — single-image restyle with InstructPix2Pix + Gradio UI (Restyle tab)
 - [x] **v0.2 — Image editing (inpainting)** — SAM segmentation + user-drawn mask + Stable Diffusion Inpainting (Masked edit tab — pure editing, no style change)
-- [ ] **v0.3 — Interactive auto-segment** — Extract Auto-Segment into its own tab with custom `InstanceSelector` component (hover-to-highlight, click-to-select, multi-select, confirm & send to Masked Edit)
+- [x] **v0.3 — Interactive auto-segment** — Extract Auto-Segment into its own tab with interactive instance canvas (hover-to-highlight, click-to-select, multi-select, confirm & send to Masked Edit)
 
 
 ## License
