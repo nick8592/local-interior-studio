@@ -209,6 +209,7 @@ _HTML_TEMPLATE = """<div id="{CONTAINER_ID}" class="isc-root">
   var hitTest = null;
   var bitmaps = [];
   var offCanvases = [];
+  var outlineCanvases = [];
   var selected = Object.create(null);
   var hoveredIdx = -1;
   var ready = false;
@@ -241,14 +242,16 @@ _HTML_TEMPLATE = """<div id="{CONTAINER_ID}" class="isc-root">
   function buildOffscreens() {{
     for (var i = 0; i < INSTANCES.length; i++) {{
       var inst = INSTANCES[i];
+      var bm = bitmaps[i];
+      var rgb = inst.color.match(/\\d+/g);
+      var cr = +rgb[0], cg = +rgb[1], cb = +rgb[2];
+
+      // Fill canvas (for semi-transparent region overlay)
       var off = document.createElement('canvas');
       off.width = imgW;
       off.height = imgH;
       var offCtx = off.getContext('2d');
       var imgData = offCtx.createImageData(imgW, imgH);
-      var bm = bitmaps[i];
-      var rgb = inst.color.match(/\\d+/g);
-      var cr = +rgb[0], cg = +rgb[1], cb = +rgb[2];
       var d = imgData.data;
       for (var p = 0; p < bm.length; p++) {{
         if (bm[p]) {{
@@ -261,6 +264,35 @@ _HTML_TEMPLATE = """<div id="{CONTAINER_ID}" class="isc-root">
       }}
       offCtx.putImageData(imgData, 0, 0);
       offCanvases.push(off);
+
+      // Outline canvas (1px edge of the mask region — panoptic outline)
+      var out = document.createElement('canvas');
+      out.width = imgW;
+      out.height = imgH;
+      var outCtx = out.getContext('2d');
+      var outData = outCtx.createImageData(imgW, imgH);
+      var od = outData.data;
+      for (var y = 0; y < imgH; y++) {{
+        for (var x = 0; x < imgW; x++) {{
+          var idx = y * imgW + x;
+          if (!bm[idx]) continue;
+          var isEdge = false;
+          if (x === 0 || x === imgW - 1 || y === 0 || y === imgH - 1) {{
+            isEdge = true;
+          }} else {{
+            if (!bm[idx - 1] || !bm[idx + 1] || !bm[idx - imgW] || !bm[idx + imgW]) isEdge = true;
+          }}
+          if (isEdge) {{
+            var o = idx * 4;
+            od[o] = cr;
+            od[o + 1] = cg;
+            od[o + 2] = cb;
+            od[o + 3] = 255;
+          }}
+        }}
+      }}
+      outCtx.putImageData(outData, 0, 0);
+      outlineCanvases.push(out);
     }}
   }}
 
@@ -283,9 +315,7 @@ _HTML_TEMPLATE = """<div id="{CONTAINER_ID}" class="isc-root">
     input.value = v;
     input.dispatchEvent(new Event('input', {{ bubbles: true }}));
     input.dispatchEvent(new Event('change', {{ bubbles: true }}));
-    if (window.parent !== window) {{
-      window.parent.postMessage({{ type: 'instance-selection', canvasId: '{CANVAS_ID}', value: v }}, '*');
-    }}
+    try {{ localStorage.setItem('{CANVAS_ID}-selection', v); }} catch(e) {{}}
   }}
 
   function render() {{
@@ -320,10 +350,10 @@ _HTML_TEMPLATE = """<div id="{CONTAINER_ID}" class="isc-root">
       ctx.drawImage(offCanvases[i], 0, 0);
       ctx.globalAlpha = 1.0;
 
-      var bb = inst.bbox;
-      ctx.strokeStyle = inst.colorHex;
-      ctx.lineWidth = lw;
-      ctx.strokeRect(bb[0], bb[1], bb[2], bb[3]);
+      ctx.globalAlpha = isSel ? 1.0 : (isHov ? 0.9 : (dim ? 0.5 : 0.8));
+      ctx.lineWidth = 1;
+      ctx.drawImage(outlineCanvases[i], 0, 0);
+      ctx.globalAlpha = 1.0;
     }}
   }}
 

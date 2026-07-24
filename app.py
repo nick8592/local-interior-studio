@@ -470,7 +470,6 @@ def build_ui() -> gr.Blocks:
                     with gr.Column(scale=1):
                         instance_html = gr.HTML(label="Select Objects")
                         seg_state = gr.State(None)
-                        seg_selection = gr.Textbox(visible=False, value="[]")
                         seg_summary = gr.Markdown("Upload a photo, then click Auto-Segment.")
                         confirm_btn = gr.Button("✅ Confirm & Send → Masked Edit", variant="primary")
 
@@ -586,14 +585,10 @@ def build_ui() -> gr.Blocks:
         )
 
         confirm_btn.click(
-            fn=None,
-            inputs=None,
-            outputs=seg_selection,
-            js="() => { const iframes = document.querySelectorAll('iframe'); for (const iframe of iframes) { try { const el = iframe.contentDocument && iframe.contentDocument.getElementById('instance-canvas-selection'); if (el && el.value) return el.value; } catch(e) {} } return '[]'; }",
-        ).then(
             fn=on_confirm_selection,
-            inputs=[seg_selection, seg_state, seg_editor],
+            inputs=[seg_state, seg_editor],
             outputs=[mask_editor, mask_status_md],
+            js="(state, editor) => { try { var v = localStorage.getItem('instance-canvas-selection'); return [v || '[]', state, editor]; } catch(e) { return ['[]', state, editor]; } }",
         ).then(
             fn=lambda: gr.update(selected="masked"),
             inputs=None,
