@@ -511,6 +511,12 @@ def build_ui() -> gr.Blocks:
         "      box.dispatchEvent(new Event('input', {bubbles:true}));\n"
         "    }\n"
         "  }\n"
+        "  if (e.data && e.data.type === 'resize-iframe' && e.data.height) {\n"
+        "    var iframes = document.querySelectorAll('iframe[id$=\"-iframe\"]');\n"
+        "    iframes.forEach(function(f) {\n"
+        "      try { f.style.height = e.data.height + 'px'; } catch(ex) {}\n"
+        "    });\n"
+        "  }\n"
         "});\n"
         "</script>"
     )

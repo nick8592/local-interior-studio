@@ -160,8 +160,9 @@ def render_instance_selector_html(
         IMAGE_JSON=image_json,
     )
 
-    return '<iframe srcdoc="{srcdoc}" style="width:100%;border:none;min-height:200px;display:block" onload="this.style.height=this.contentDocument.body.scrollHeight+\'px\'"></iframe>'.format(
+    return '<iframe srcdoc="{srcdoc}" style="width:100%;border:none;min-height:200px;display:block" onload="this.style.height=this.contentDocument.body.scrollHeight+\'px\'" id="{canvas_id}-iframe"></iframe>'.format(
         srcdoc=html.escape(iframe_srcdoc, quote=True),
+        canvas_id=html.escape(canvas_id, quote=True),
     )
 
 
@@ -178,7 +179,6 @@ _HTML_TEMPLATE = """<div id="{CONTAINER_ID}" class="isc-root">
 #{CONTAINER_ID} canvas {{
   display: block;
   width: 100% !important;
-  height: auto !important;
   max-width: 100%;
   cursor: crosshair;
   border-radius: 6px;
@@ -370,11 +370,22 @@ _HTML_TEMPLATE = """<div id="{CONTAINER_ID}" class="isc-root">
   }}
 
   function pointFromEvent(e) {{
-    var rect = canvas.getBoundingClientRect();
-    var sx = imgW / rect.width;
-    var sy = imgH / rect.height;
-    var x = Math.floor((e.clientX - rect.left) * sx);
-    var y = Math.floor((e.clientY - rect.top) * sy);
+    /* Use offsetX/offsetY which are relative to the target element and
+       correctly account for CSS transforms, padding and borders.
+       Fall back to getBoundingClientRect math for older browsers. */
+    var x, y;
+    if (typeof e.offsetX === 'number' && e.target === canvas) {{
+      var sx = imgW / canvas.clientWidth;
+      var sy = imgH / canvas.clientHeight;
+      x = Math.floor(e.offsetX * sx);
+      y = Math.floor(e.offsetY * sy);
+    }} else {{
+      var rect = canvas.getBoundingClientRect();
+      var sx2 = imgW / rect.width;
+      var sy2 = imgH / rect.height;
+      x = Math.floor((e.clientX - rect.left) * sx2);
+      y = Math.floor((e.clientY - rect.top) * sy2);
+    }}
     return [x, y];
   }}
 
@@ -439,6 +450,23 @@ _HTML_TEMPLATE = """<div id="{CONTAINER_ID}" class="isc-root">
     if (!imgW || !imgH) return;
     canvas.width = imgW;
     canvas.height = imgH;
+    /* Set CSS height to maintain aspect ratio so getBoundingClientRect
+       returns a proportional rect that matches the image dimensions.
+       Without this, the canvas uses its buffer height as the CSS height
+       which breaks coordinate mapping when the container is narrower. */
+    function syncCanvasSize() {{
+      var container = document.getElementById('{CONTAINER_ID}');
+      var cw = container ? container.clientWidth : canvas.clientWidth;
+      var cssHeight = Math.round(cw * (imgH / imgW));
+      canvas.style.height = cssHeight + 'px';
+      /* Notify parent iframe to resize so scroll height is correct */
+      try {{
+        var h = document.body.scrollHeight;
+        window.parent.postMessage({{ type: 'resize-iframe', height: h }}, '*');
+      }} catch(e) {{}}
+    }}
+    syncCanvasSize();
+    window.addEventListener('resize', syncCanvasSize);
     buildHitTest();
     buildOffscreens();
     ready = true;
