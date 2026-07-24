@@ -180,8 +180,7 @@ Upload a room photo → pick a style preset or write a custom prompt → adjust 
 |---|---|---|
 | **Restyle** | ✅ Implemented | Upload → pick style → generate (style change only) |
 | **Image editing** | ✅ Implemented | Auto-segment → draw mask → inpaint masked area (editing only, no style change) |
-| **Batch** | 🔲 Planned | Upload folder → pick style → restyle all |
-| **Upscale** | 🔲 Planned | 4× Real-ESRGAN upscaling for print quality |
+
 
 ### Available style presets
 
@@ -238,9 +237,7 @@ Tests use mocked ML objects and run without GPU, model downloads, or internet ac
 
 - [x] **v0.1 — Proof of concept** — single-image restyle with InstructPix2Pix + Gradio UI (Restyle tab)
 - [x] **v0.2 — Image editing (inpainting)** — SAM segmentation + user-drawn mask + Stable Diffusion Inpainting (Masked edit tab — pure editing, no style change)
-- [ ] **v0.3 — Style presets** — curated prompt library with preview thumbnails
-- [ ] **v0.4 — Multi-room batch** — process a folder of room photos with one style (Batch tab)
-- [ ] **v0.5 — Upscale output** — Real-ESRGAN 4× upscaling for print-quality renders (Upscale tab)
+
 
 ## License
 
