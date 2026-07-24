@@ -152,6 +152,7 @@ Tests use mocked ML objects and run without GPU or internet access.
 - [x] **v0.2 — Image editing (inpainting)** — SAM segmentation + user-drawn mask + Stable Diffusion Inpainting (Masked edit tab)
 - [x] **v0.3 — Interactive auto-segment** — Interactive instance canvas with hover/select and mask transfer
 - [x] **v0.4 — Direct inpaint in Auto-Segment** — Select objects on panoptic overlay, inpaint directly without tab-switch; selected-objects list with color swatches; Mask-Edit retained for manual brush workflow
+- [x] **v0.5 — Brush alignment fix** — Fixed cursor-to-brush offset in Masked Edit (Gradio ImageEditor) and Auto-Segment (instance selector canvas); upgraded Gradio 4.19→4.44; pinned pydantic<2.11
 
 ## License
 
