@@ -302,6 +302,14 @@ def build_ui() -> gr.Blocks:
                         sources=["upload", "clipboard"],
                     )
 
+                    _restyle_examples = _list_example_images()
+                    if _restyle_examples:
+                        gr.Examples(
+                            examples=[[p] for p in _restyle_examples],
+                            inputs=[source_img],
+                            label="Example Room Photos",
+                        )
+
                     preset_dd = gr.Dropdown(
                         choices=preset_names,
                         value=preset_names[0],
@@ -347,14 +355,6 @@ def build_ui() -> gr.Blocks:
 
                     generate_btn = gr.Button("✨ Generate", variant="primary")
 
-                    _restyle_examples = _list_example_images()
-                    if _restyle_examples:
-                        gr.Examples(
-                            examples=[[p] for p in _restyle_examples],
-                            inputs=[source_img],
-                            label="Example Room Photos",
-                        )
-
                 # --- Output column ---
                 with gr.Column(scale=1):
                     output_img = gr.Image(type="pil", label="Result")
@@ -371,6 +371,14 @@ def build_ui() -> gr.Blocks:
                         label="Room Photo + Mask",
                         sources=["upload", "clipboard"],
                     )
+
+                    _masked_examples = _list_example_images()
+                    if _masked_examples:
+                        gr.Examples(
+                            examples=[[p] for p in _masked_examples],
+                            inputs=[mask_editor],
+                            label="Example Room Photos",
+                        )
 
                     auto_seg_btn = gr.Button("🔍 Auto-Segment (SAM)", variant="secondary")
 
@@ -430,14 +438,6 @@ def build_ui() -> gr.Blocks:
                     )
 
                     mask_generate_btn = gr.Button("✨ Generate (Inpaint)", variant="primary")
-
-                    _masked_examples = _list_example_images()
-                    if _masked_examples:
-                        gr.Examples(
-                            examples=[[p] for p in _masked_examples],
-                            inputs=[mask_editor],
-                            label="Example Room Photos",
-                        )
 
                 # --- Output column ---
                 with gr.Column(scale=1):
